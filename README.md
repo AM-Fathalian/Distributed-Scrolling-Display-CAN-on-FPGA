@@ -16,31 +16,197 @@ SystemVerilog, bus interconnect integration, and FPGA implementation on the
 
 ## Table of Contents
 
-1. [Project Overview](#project-overview)
-2. [Repository Structure](#repository-structure)
-3. [Architecture](#architecture)
+1. [Assignment Specification](#assignment-specification)
+   - [Project Overview (Assignment)](#project-overview-assignment)
+   - [Development Target](#development-target)
+   - [Switches and Buttons as System Input](#switches-and-buttons-as-system-input)
+   - [The CAN Controller](#the-can-controller)
+   - [The Data Protocol](#the-data-protocol)
+   - [Testing](#testing)
+   - [Initialization Problem](#initialization-problem)
+   - [Completion](#completion)
+2. [Project Overview](#project-overview)
+3. [Repository Structure](#repository-structure)
+4. [Architecture](#architecture)
    - [Processor Core](#processor-core)
    - [Bus Interconnect](#bus-interconnect)
    - [Memory](#memory)
    - [Peripherals](#peripherals)
-4. [Memory Map](#memory-map)
-5. [Team-Authored Files](#team-authored-files)
+5. [Memory Map](#memory-map)
+6. [Team-Authored Files](#team-authored-files)
    - [System Configuration — `config_pkg.sv`](#system-configuration--config_pkgsv)
    - [Top Level](#top-level)
    - [Peripheral Modules](#peripheral-modules)
    - [Assembly Programs](#assembly-programs)
-6. [Peripheral Reference](#peripheral-reference)
+7. [Peripheral Reference](#peripheral-reference)
    - [LED Output](#led-output)
    - [Switch / Button Input](#switch--button-input)
    - [Scrolling 7-Segment Display](#scrolling-7-segment-display)
    - [CAN Bus Controller](#can-bus-controller)
-7. [Assembly Programming Model](#assembly-programming-model)
+8. [Assembly Programming Model](#assembly-programming-model)
    - [Interrupt Architecture](#interrupt-architecture)
    - [Boot Sequence](#boot-sequence)
    - [Register Conventions](#register-conventions)
-8. [Building the Software](#building-the-software)
-9. [Testbenches](#testbenches)
-10. [Languages Used](#languages-used)
+9. [Building the Software](#building-the-software)
+10. [Testbenches](#testbenches)
+11. [Languages Used](#languages-used)
+
+---
+
+## Assignment Specification
+
+> The full specification is also available as [`project2025c.pdf`](project2025c.pdf).
+>
+> *Source: Embedded Systems Laboratory, TU Kaiserslautern —
+> apl. Prof. Dr.-Ing. Dominik Stoffel, Dipl.-Ing. Johannes Müller*
+
+### Project Overview (Assignment)
+
+The design project of this semester's Embedded Systems Lab extends previously
+developed hardware and software.  The task is to develop a **client in a
+distributed system**.  The main function of the system is to **synchronize a
+dataset between all clients**.
+
+Each client can modify the dataset using the switches and buttons (introduced in
+Warmup 2).  To indicate the state of each client, the data is displayed using
+the **scrolling text display** (from Warmup 4).  For synchronization, a simple
+**CAN-based protocol** is provided to exchange data.
+
+Each group plans the architecture in advance, identifies tasks, distributes
+them among group members, and creates a schedule.  This plan is presented in a
+review meeting before implementation begins.
+
+---
+
+### Development Target
+
+Each client has a **data set consisting of 16 individual 5-bit values** that
+encode hexadecimal characters, displayed on the scrolling text display.  The
+data is shared by all clients in the system.
+
+- Clients can make changes to the dataset using their buttons and switches.
+- When a client changes the data it must **synchronize the change with all
+  other clients** via the CAN bus.
+- Only the scrolling **speed** and the **data set** need to be synchronous —
+  not the exact time points of the changes on the display.
+
+---
+
+### Switches and Buttons as System Input
+
+The switches component developed in Warmup 2 manages 5 buttons and 16
+switches.  In this project the buttons implement three control functions
+(each assigned to one button of your choice):
+
+| Function | Input used |
+|---|---|
+| Add a 5-bit data item to the dataset | Bottom 5 switches |
+| Clear the dataset | — |
+| Update the scrolling speed | Top 16 switches |
+
+For the scrolling speed the 16-bit switch value is interpreted as the **16 most
+significant bits of a 32-bit unsigned number** (lower 16 bits filled with
+zeros), keeping the speed in a human-observable range.
+
+---
+
+### The CAN Controller
+
+The repository contains the hardware design for a CAN controller that is
+functionally compatible with the **SJA1000 (and PCA82C200)**.  Use only the
+basic transmit functions; do **not** use the PeliCAN mode.
+
+- The controller is written in Verilog with an **8-bit Wishbone interface**
+  (byte-accessible only).
+- A SystemVerilog wrapper (`soc/peripheral/CAN/can_wrapper.sv`) connects it to
+  the rest of the system.
+- The wrapper does not extend its data interface beyond 8 bits, so only
+  **byte-sized accesses** are allowed.
+
+To physically interact with the CAN network a **CAN Transceiver Pmod** (RS-485
+driver board) is connected to one of the Pmod connectors on the FPGA board.
+The chosen connector's pins must be mapped in the `.xdc` constraints file.  The
+maximum bit-rate is 16 Mbit/s; prior experience recommends choosing a
+significantly lower value.
+
+---
+
+### The Data Protocol
+
+The protocol uses three CAN frame types.  The **11-bit CAN ID** consists of a
+6-bit fixed update code (`000001`) and a **5-bit client-unique node ID**.
+
+#### Frame type 0 — Data Add
+
+Sent when a client adds a character to the dataset.
+
+| Field | Value |
+|---|---|
+| Frame type byte | `0x00` |
+| Data byte | 5-bit character value |
+
+Upon receiving a data-add frame the client should add the 5-bit character to
+its dataset.  If the buffer is already full, the first element is overwritten
+(consistent with the ring-buffer behaviour).
+
+#### Frame type 1 — Dataset Clear
+
+Sent when a client receives a clear command from the buttons.
+
+| Field | Value |
+|---|---|
+| Frame type byte | `0x01` |
+
+Both sender and receiver invoke the clear-buffer functionality of the display
+controller.
+
+#### Frame type 3 — Update Scrolling Speed
+
+Sent when a client updates the scrolling speed.
+
+| Field | Value |
+|---|---|
+| Frame type byte | `0x03` |
+| Data bytes 1–2 | Bits [31:16] of the 32-bit scroll counter value (`cnt_value`) |
+
+Multiple clients initiating updates at (roughly) the same time can cause race
+conditions; consider how they can occur and how to avoid them.
+
+---
+
+### Testing
+
+For successful verification, simulate a system with **multiple clients**: create
+several instances of the SoC and connect their CAN ports together.  Adjust the
+scrolling speed to reduce the simulation window size.
+
+---
+
+### Initialization Problem
+
+Because the system is asynchronous and clients may be added or removed at any
+time, a **new client does not start with a synchronized copy of the dataset**.
+Consider possible solutions and present a protocol extension in the review
+meeting.  Implementation of the solution is not required.
+
+---
+
+### Completion
+
+**Review meeting** (before implementation):
+
+- Present your project plan (hardware/software partitioning, task
+  identification and distribution, timeline for implementation and testing).
+- Schedule the meeting by contacting Prof. Stoffel.
+
+**Demonstration** (after implementation), divided into two parts:
+
+1. **Simulation**: at least two clients displaying patterns in sync; each
+   client performs every update function at least once.
+2. **FPGA implementation**: run on the Nexys A7-100T board; additional boards
+   may be provided as peers in the CAN network.
+
+The deadline is the last week of the lecture period.
 
 ---
 
