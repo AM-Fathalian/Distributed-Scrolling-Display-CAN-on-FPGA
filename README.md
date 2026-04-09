@@ -160,17 +160,23 @@ Sent when a client receives a clear command from the buttons.
 Both sender and receiver invoke the clear-buffer functionality of the display
 controller.
 
-#### Frame type 3 — Update Scrolling Speed
+#### Frame type 2 — Update Scrolling Speed *(implementation)*
 
-Sent when a client updates the scrolling speed.
+> **Note:** The assignment specification labels this as "Frame type 3" with a
+> frame-type byte of `0x03`, and specifies that the payload carries bits
+> `[31:16]` of `cnt_value`.  The actual implementation uses **command byte
+> `0x02`** and sends the 16-bit **switch value** (SW[15:0]) in the two data
+> bytes.  Receivers reconstruct the speed counter value by shifting the received
+> 16-bit word into the upper half of the 32-bit `cnt_value` register.
 
 | Field | Value |
 |---|---|
-| Frame type byte | `0x03` |
-| Data bytes 1–2 | Bits [31:16] of the 32-bit scroll counter value (`cnt_value`) |
+| Frame type byte | `0x02` |
+| Data byte 1 | SW[7:0] (lower 8 bits of switch state) |
+| Data byte 2 | SW[15:8] (upper 8 bits of switch state) |
 
-Multiple clients initiating updates at (roughly) the same time can cause race
-conditions; consider how they can occur and how to avoid them.
+Upon receiving a speed-update frame the client shifts the two bytes into bits
+[23:16] of Word 1 of the scrolling display register, updating the scroll timer.
 
 ---
 
@@ -428,7 +434,7 @@ transceiver signals).
 | `seven_segment_display.sv` | Time-multiplexed 8-digit 7-segment display; accepts write/shift/clear/off control pulses; uses `simple_timer` for ~1 kHz refresh |
 | `seven_segment_display_adv.sv` | Extended version of the above; adds an extra control-register word and uses `db_reg_intf` directly |
 | `scrolling_timer.sv` | One-shot countdown timer; loads `cnt_value` on `cnt_start` and fires a one-cycle `cnt_done` pulse at expiry |
-| `scrolling_buffer.sv` | 16-entry circular ring buffer; separates write and read pointers; on `next_char`, advances the read pointer and outputs the next 5-bit hex character; blanks the display when all written characters have scrolled past |
+| `scrolling_buffer.sv` | 16-entry circular ring buffer; separates write and read pointers; on `next_char`, advances the read pointer and outputs the next 5-bit hex character; once all written characters have scrolled past, the read pointer wraps only after an additional 8 steps (one full display width of blank digits), providing a natural gap before the sequence repeats |
 | `scrolling_controller.sv` | Three-state Mealy FSM (OFF → UPDATE → WAIT) that drives `seven_segment_display` signals; advances `scrolling_buffer` on each timer tick |
 | `scrolling_top.sv` | Top-level assembly of the scrolling subsystem; instantiates `db_reg_intf`, `scrolling_timer`, `scrolling_buffer`, `scrolling_controller`, and `seven_segment_display`; detects rising edges on control bits and forwards them to the appropriate submodule |
 
@@ -468,7 +474,15 @@ The program implements a **CAN bus node** that:
 
 5. Each ISR (`_send_message_isr`, `_update_speed_isr`, `_clear_buffer_isr`,
    `_can_isr`) saves/restores registers, sets the corresponding flag bit in
-   `s1`, and returns with `mret`
+   `s1`, and returns with `mret`.  `_can_isr` additionally reads the received
+   frame's DLC and payload bytes directly into saved registers (`s8`/`s6`/`s9`)
+   before releasing the SJA1000 RX buffer.
+
+6. In `projectv1_l.s` (the clean version), **interrupts are temporarily
+   disabled** (`csrw mie, zero`) around the read of `s8`/`s6`/`s9` in the
+   main loop's CAN handler to prevent the ISR from overwriting those registers
+   while they are being processed (a race condition absent from the annotated
+   `projectv1.s`).  Interrupts are re-enabled immediately after.
 
 ---
 
@@ -496,10 +510,17 @@ sw  t1, 0(t0)
 ```
 Base address : 0x000F0020
 Access       : read word
-Interrupts   : irq_lines[0] (right button), [1] (bottom button), [2] (left button)
+Interrupts   : irq_lines[0] (right button — BTN4), [1] (bottom button — BTN3), [2] (left button — BTN2)
 ```
 
-Reading this register also clears any pending button interrupt.
+Reading this register clears any pending button interrupt (the IRQ line is
+de-asserted on the cycle the read completes).
+
+| Button signal | Bit in register | IRQ line | ISR label |
+|---|---|---|---|
+| BTN4 (right) | `[20]` | `irq_lines[0]` / `mie[16]` | `_send_message_isr` |
+| BTN3 (bottom) | `[19]` | `irq_lines[1]` / `mie[17]` | `_update_speed_isr` |
+| BTN2 (left) | `[18]` | `irq_lines[2]` / `mie[18]` | `_clear_buffer_isr` |
 
 **Example:**
 ```asm
@@ -595,10 +616,13 @@ The assembly programs use the following saved-register assignments:
 | `s2` | CAN controller base address (`0x000F0100`) |
 | `s3` | Short delay loop bound |
 | `s4` | Long delay loop bound |
-| `s5` | CAN ID low byte (formatted) |
-| `s6` | CAN ID high byte (formatted) |
-| `s7` | Last switch value read |
+| `s5` | CAN TX ID low byte (formatted: client ID bits [2:0] shifted to [7:5]) |
+| `s6` | CAN TX ID high byte (client ID bits [4:3] \| `0x04` standard-frame bit) / RX data low byte |
+| `s7` | Last switch value read (17-bit: SW[16:0]) |
+| `s8` | CAN received command byte (set in `_can_isr`) |
+| `s9` | CAN received data high byte (set in `_can_isr` for 3-byte frames) |
 | `s10` | Scrolling display base address (`0x000F0060`) |
+| `s11` | Scratch register for composing scrolling display write words |
 
 ---
 
