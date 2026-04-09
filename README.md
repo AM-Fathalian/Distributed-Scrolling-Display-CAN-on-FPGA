@@ -1,10 +1,30 @@
-# Distributed-Scrolling-Display-CAN-on-FPGA
+# Distributed Scrolling Display over CAN on FPGA
 
-This repository contains the publicly shareable portion of an educational SoC
-project developed as part of an Embedded Systems Lab course.  It demonstrates
-the full design stack: RISC-V assembly programming, custom peripheral design in
-SystemVerilog, bus interconnect integration, and FPGA implementation on the
-**Digilent Nexys A7-100T** board.
+> **An exploratory project log** — documenting a distributed embedded system
+> developed during the Embedded Systems Lab at TU Kaiserslautern.
+> Everything described here was built and verified to work.
+> The one thing we did *not* reach in time was the final
+> **PID Controller** extension — the rest of the system
+> ran seamlessly end-to-end.
+
+---
+
+## ⚡ Project Status
+
+| Module | Status |
+|---|---|
+| RISC-V SoC (`lt16soc`) on Nexys A7-100T | ✅ Working |
+| OBI bus interconnect + memory | ✅ Working |
+| LED output peripheral | ✅ Working |
+| Switch / button input with interrupts | ✅ Working |
+| Scrolling 7-segment display | ✅ Working |
+| CAN controller integration (SJA1000) | ✅ Working |
+| CAN transmit: data-add, clear, speed frames | ✅ Working |
+| CAN receive: interrupt-driven handler | ✅ Working |
+| Multi-client dataset synchronisation via CAN | ✅ Working |
+| PID Controller closed-loop extension | ❌ Not reached |
+
+---
 
 > **Note on private IP**: The processor core (`soc/core/cv32e40p/`), the clock
 > divider IP (`soc/peripheral/clk_div/`), and the open-source CAN controller
@@ -16,7 +36,8 @@ SystemVerilog, bus interconnect integration, and FPGA implementation on the
 
 ## Table of Contents
 
-1. [Assignment Specification](#assignment-specification)
+1. [How We Got Here — The Development Journey](#how-we-got-here--the-development-journey)
+2. [Assignment Specification](#assignment-specification)
    - [Project Overview (Assignment)](#project-overview-assignment)
    - [Development Target](#development-target)
    - [Switches and Buttons as System Input](#switches-and-buttons-as-system-input)
@@ -25,31 +46,70 @@ SystemVerilog, bus interconnect integration, and FPGA implementation on the
    - [Testing](#testing)
    - [Initialization Problem](#initialization-problem)
    - [Completion](#completion)
-2. [Project Overview](#project-overview)
-3. [Repository Structure](#repository-structure)
-4. [Architecture](#architecture)
+3. [Project Overview](#project-overview)
+4. [Repository Structure](#repository-structure)
+5. [Architecture](#architecture)
    - [Processor Core](#processor-core)
    - [Bus Interconnect](#bus-interconnect)
    - [Memory](#memory)
    - [Peripherals](#peripherals)
-5. [Memory Map](#memory-map)
-6. [Team-Authored Files](#team-authored-files)
+6. [Memory Map](#memory-map)
+7. [Team-Authored Files](#team-authored-files)
    - [System Configuration — `config_pkg.sv`](#system-configuration--config_pkgsv)
    - [Top Level](#top-level)
    - [Peripheral Modules](#peripheral-modules)
    - [Assembly Programs](#assembly-programs)
-7. [Peripheral Reference](#peripheral-reference)
+8. [Peripheral Reference](#peripheral-reference)
    - [LED Output](#led-output)
    - [Switch / Button Input](#switch--button-input)
    - [Scrolling 7-Segment Display](#scrolling-7-segment-display)
    - [CAN Bus Controller](#can-bus-controller)
-8. [Assembly Programming Model](#assembly-programming-model)
-   - [Interrupt Architecture](#interrupt-architecture)
-   - [Boot Sequence](#boot-sequence)
-   - [Register Conventions](#register-conventions)
-9. [Building the Software](#building-the-software)
-10. [Testbenches](#testbenches)
-11. [Languages Used](#languages-used)
+9. [Notable Engineering Challenges](#notable-engineering-challenges)
+10. [Assembly Programming Model](#assembly-programming-model)
+    - [Interrupt Architecture](#interrupt-architecture)
+    - [Boot Sequence](#boot-sequence)
+    - [Register Conventions](#register-conventions)
+11. [Building the Software](#building-the-software)
+12. [Testbenches](#testbenches)
+13. [What We Would Have Built Next — PID Controller](#what-we-would-have-built-next--pid-controller)
+14. [Languages Used](#languages-used)
+
+---
+
+## How We Got Here — The Development Journey
+
+This project was the capstone of a semester-long Embedded Systems Lab.
+Rather than starting from scratch, we built every piece incrementally
+across a series of "Warmup" exercises before integrating them into the
+final system.
+
+```
+Warmup 1  ──  Timer / counter peripheral on bare RISC-V SoC
+Warmup 2  ──  Switch & button input peripheral with interrupts
+Warmup 3  ──  Seven-segment display driver (basic, then advanced)
+Warmup 4  ──  Scrolling text display (ring buffer + FSM controller)
+              │
+              └──► Project: Tie everything together with a CAN bus
+                            to create a distributed, multi-node
+                            synchronized display system
+```
+
+Each warmup exercised a different layer of the stack — from
+low-level bus interface design in SystemVerilog to interrupt-driven
+RISC-V assembly firmware.  By the time we started the project proper
+we had all the building blocks; what remained was:
+
+1. Integrating the CAN controller into the SoC
+2. Writing the CAN communication firmware
+3. Defining and implementing the 3-frame data protocol
+4. Testing with multiple simulated clients
+
+All four of those steps were completed and verified.
+The only piece that was planned but not reached was a
+**closed-loop PID Controller** that would have used the CAN-distributed
+data as a process variable — see
+[What We Would Have Built Next](#what-we-would-have-built-next--pid-controller)
+for details.
 
 ---
 
@@ -472,6 +532,59 @@ The program implements a **CAN bus node** that:
 
 ---
 
+## Notable Engineering Challenges
+
+Developing this system was genuinely hard.  Below are some of the real
+problems we ran into and how we solved them.
+
+### 1 — CAN reset mode handshake
+
+The SJA1000 enters reset mode only after the hardware acknowledges the
+request — simply writing `1` to the reset bit and immediately proceeding
+was not safe.  We had to poll the register in a loop until the bit was
+confirmed set, then configure timing/filter registers, then poll again
+until the bit cleared on exit.  Getting this sequence right (and not
+overwriting reserved bits) cost us several hours.
+
+### 2 — Nested function calls break `ra` in assembly
+
+The very first version of the TX path called a `wait_tx_buffer_free`
+helper from inside `send_CAN_message`.  The `call` pseudo-instruction
+overwrites `ra`, so when the inner function returned, `ra` already held
+the wrong address and the outer function could never return to `main`.
+The fix was to inline the polling loop directly inside each send routine
+(three separate copies: `wait_tx_buffer_free_1/2/3`).
+
+### 3 — Shared ISR data and race conditions
+
+The CAN receive ISR writes decoded frame bytes into `s8`, `s6`, and `s9`
+(the saved registers used as a shared mailbox).  The main loop reads those
+same registers in `handle_can_message`.  Without protection, a second
+interrupt firing mid-handler would corrupt the values.  We solved this
+by disabling host interrupts (`csrw mie, zero`) around the critical
+section in the main loop and re-enabling them immediately after.
+
+### 4 — Rising-edge detection in hardware
+
+The scrolling display control register uses single-bit *pulses* (on/off
+toggle, buffer write, buffer clear) rather than level signals.  The
+hardware had to detect a 0→1 transition on each bit, act, then auto-clear
+the bit before the next bus read — all within the `always_ff` block of
+`scrolling_top.sv`.  An earlier version missed the auto-clear step,
+causing the action to repeat on every clock cycle.
+
+### 5 — `ptr_last` sentinel value
+
+The `scrolling_buffer` uses `ptr_last = 5'b11111` as a "buffer empty"
+sentinel (since valid indices only go to 15).  During scrolling, the read
+pointer must wrap back to zero after passing `ptr_last`, but only after
+the 8 display digits have had time to show blank characters.  Getting the
+wrap condition (`ptr_read >= 8 + ptr_last`) right — so the display blanks
+correctly without cutting off the last character — required multiple
+simulation iterations.
+
+---
+
 ## Peripheral Reference
 
 ### LED Output
@@ -639,6 +752,64 @@ peripherals as well as integrated platform scenarios:
 | `seven_segment_display_tb.sv` | 7-segment display driver |
 | `simple_timer_tb.sv` | `simple_timer` |
 | `warmup1_tb.sv` – `warmup_4_3_tb.sv` | Incremental warm-up exercises |
+
+---
+
+## What We Would Have Built Next — PID Controller
+
+With the distributed CAN infrastructure in place, the natural next step
+was to close a **feedback control loop** across the network.  The idea:
+
+```
+  ┌──────────┐   CAN frame   ┌──────────────┐
+  │ Sensor   │ ─────────────► │  PID Node    │
+  │ Node     │               │  (our FPGA)  │
+  └──────────┘               │              │
+                             │  error = SP - PV
+                             │  u = Kp·e + Ki·∫e + Kd·ė
+                             │              │
+                             └──────┬───────┘
+                                    │ CAN frame (actuator command)
+                                    ▼
+                             ┌──────────────┐
+                             │  Actuator    │
+                             │  Node        │
+                             └──────────────┘
+```
+
+**What we planned:**
+
+1. **Hardware PID peripheral** (`pid_controller.sv`) — a fixed-point
+   arithmetic unit computing proportional, integral, and derivative
+   terms at each sample tick.  It would be memory-mapped on the OBI bus
+   with registers for set-point (SP), process variable (PV), gains
+   (Kp, Ki, Kd), output saturation limits, and the computed control
+   output `u`.
+
+2. **CAN integration** — the `_can_isr` would parse an additional frame
+   type carrying the PV from a sensor node, write it into the PID
+   peripheral's PV register, then let the hardware compute the new `u`
+   autonomously.
+
+3. **Actuator command frame** — a new frame type (type `0x04`) would carry
+   the 16-bit saturation-clamped `u` value back onto the bus so an
+   actuator node could act on it.
+
+4. **Assembly firmware** — a new `handle_pid_frame` branch in the main
+   loop, and a matching `send_pid_command` transmit routine.
+
+**Why we didn't get there:**
+
+Integrating the CAN controller reliably (particularly the reset-mode
+handshake and the interrupt/shared-register race condition) took
+significantly longer than anticipated.  Once CAN was stable and
+verified, the lab deadline was too close to start the PID peripheral
+design, verify it in simulation, and close the full loop on the FPGA.
+
+The groundwork is all there — adding a PID peripheral would follow
+exactly the same pattern used for the scrolling display:
+define address constants in `config_pkg.sv`, instantiate the module in
+`top.sv`, expose registers via `db_reg_intf`, and extend the firmware.
 
 ---
 
