@@ -165,18 +165,20 @@ controller.
 > **Note:** The assignment specification labels this as "Frame type 3" with a
 > frame-type byte of `0x03`, and specifies that the payload carries bits
 > `[31:16]` of `cnt_value`.  The actual implementation uses **command byte
-> `0x02`** and sends the 16-bit **switch value** (SW[15:0]) in the two data
-> bytes.  Receivers reconstruct the speed counter value by shifting the received
-> 16-bit word into the upper half of the 32-bit `cnt_value` register.
+> `0x02`** and sends the 16-bit **switch value** (SW[15:0]) split across two
+> data bytes.  The section heading uses "Frame type 2" to match the implemented
+> command byte value (`0x02`), not the assignment's enumeration.
 
 | Field | Value |
 |---|---|
-| Frame type byte | `0x02` |
+| Command byte (data byte 0) | `0x02` |
 | Data byte 1 | SW[7:0] (lower 8 bits of switch state) |
 | Data byte 2 | SW[15:8] (upper 8 bits of switch state) |
 
-Upon receiving a speed-update frame the client shifts the two bytes into bits
-[23:16] of Word 1 of the scrolling display register, updating the scroll timer.
+Upon receiving a speed-update frame the client reassembles the 16-bit value
+(`s9 << 8 | s6`) and shifts it left by 16 to form a 32-bit `cnt_value`
+(`[31:16]` = received 16 bits, `[15:0]` = 0), then writes the result to Word 1
+of the scrolling display register.
 
 ---
 
@@ -616,8 +618,8 @@ The assembly programs use the following saved-register assignments:
 | `s2` | CAN controller base address (`0x000F0100`) |
 | `s3` | Short delay loop bound |
 | `s4` | Long delay loop bound |
-| `s5` | CAN TX ID low byte (formatted: client ID bits [2:0] shifted to [7:5]) |
-| `s6` | CAN TX ID high byte (client ID bits [4:3] \| `0x04` standard-frame bit) / RX data low byte |
+| `s5` | CAN TX ID low byte (client ID bits [2:0] shifted to [7:5]); combined with DLC when writing to TX descriptor |
+| `s6` | **During TX:** CAN TX ID high byte (client ID bits [4:3] \| `0x04` standard-frame bit). **After `_can_isr`:** received data byte 1 (low byte of payload) |
 | `s7` | Last switch value read (17-bit: SW[16:0]) |
 | `s8` | CAN received command byte (set in `_can_isr`) |
 | `s9` | CAN received data high byte (set in `_can_isr` for 3-byte frames) |
